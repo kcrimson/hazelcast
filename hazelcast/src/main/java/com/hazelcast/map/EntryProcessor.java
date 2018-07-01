@@ -101,4 +101,6 @@ public interface EntryProcessor<K, V> extends Serializable {
      * @return the back up processor
      */
     EntryBackupProcessor<K, V> getBackupProcessor();
+    
+    TopologyChangeStrategy onTopologyChange();
 }

@@ -16,9 +16,20 @@
 
 package com.hazelcast.map.impl.operation;
 
+import static com.hazelcast.map.impl.operation.EntryOperator.operator;
+import static com.hazelcast.util.SetUtil.createHashSet;
+
+import java.io.IOException;
+import java.util.Set;
+
 import com.hazelcast.core.ManagedContext;
+import com.hazelcast.core.MemberAttributeEvent;
+import com.hazelcast.core.MembershipEvent;
+import com.hazelcast.core.MembershipListener;
+import com.hazelcast.internal.cluster.ClusterService;
 import com.hazelcast.map.EntryBackupProcessor;
 import com.hazelcast.map.EntryProcessor;
+import com.hazelcast.map.TopologyChangeStrategy;
 import com.hazelcast.map.impl.MapDataSerializerHook;
 import com.hazelcast.map.impl.MapEntries;
 import com.hazelcast.nio.ObjectDataInput;
@@ -31,113 +42,126 @@ import com.hazelcast.spi.PartitionAwareOperation;
 import com.hazelcast.spi.impl.MutatingOperation;
 import com.hazelcast.spi.serialization.SerializationService;
 
-import java.io.IOException;
-import java.util.Set;
-
-import static com.hazelcast.map.impl.operation.EntryOperator.operator;
-import static com.hazelcast.util.SetUtil.createHashSet;
-
-
 public class MultipleEntryOperation extends MapOperation
-        implements MutatingOperation, PartitionAwareOperation, BackupAwareOperation {
+		implements MutatingOperation, PartitionAwareOperation, BackupAwareOperation {
 
-    protected Set<Data> keys;
-    protected MapEntries responses;
-    protected EntryProcessor entryProcessor;
+	protected Set<Data> keys;
+	protected MapEntries responses;
+	protected EntryProcessor entryProcessor;
 
-    protected transient EntryOperator operator;
+	protected transient EntryOperator operator;
+	protected transient ClusterService clusterService;
+	private transient int memberListVersion;
 
-    public MultipleEntryOperation() {
-    }
+	public MultipleEntryOperation() {
+	}
 
-    public MultipleEntryOperation(String name, Set<Data> keys, EntryProcessor entryProcessor) {
-        super(name);
-        this.keys = keys;
-        this.entryProcessor = entryProcessor;
-    }
+	public MultipleEntryOperation(String name, Set<Data> keys, EntryProcessor entryProcessor) {
+		super(name);
+		this.keys = keys;
+		this.entryProcessor = entryProcessor;
+	}
 
-    @Override
-    public void innerBeforeRun() throws Exception {
-        super.innerBeforeRun();
+	@Override
+	public void innerBeforeRun() throws Exception {
+		super.innerBeforeRun();
 
-        final SerializationService serializationService = getNodeEngine().getSerializationService();
-        final ManagedContext managedContext = serializationService.getManagedContext();
-        managedContext.initialize(entryProcessor);
-    }
+		final SerializationService serializationService = getNodeEngine().getSerializationService();
+		final ManagedContext managedContext = serializationService.getManagedContext();
+		managedContext.initialize(entryProcessor);
 
-    @Override
-    @SuppressWarnings("checkstyle:npathcomplexity")
-    public void run() throws Exception {
-        responses = new MapEntries(keys.size());
+		clusterService = getNodeEngine().getClusterService();
+		memberListVersion = clusterService.getMemberListVersion();
+	}
 
-        operator = operator(this, entryProcessor, getPredicate());
-        for (Data key : keys) {
-            Data response = operator.operateOnKey(key).doPostOperateOps().getResult();
-            if (response != null) {
-                responses.add(key, response);
-            }
-        }
-    }
+	@Override
+	@SuppressWarnings("checkstyle:npathcomplexity")
+	public void run() throws Exception {
+		responses = new MapEntries(keys.size());
 
-    protected Predicate getPredicate() {
-        return null;
-    }
+		operator = operator(this, entryProcessor, getPredicate());
+		for (Data key : keys) {
+			if (isNotMainPartition() && topologyChanged()) {
+				TopologyChangeStrategy strategy = entryProcessor.onTopologyChange();
+				if (strategy != null && TopologyChangeStrategy.CANCEL.equals(strategy)) {
+					break;
+				}
+			}
+			Data response = operator.operateOnKey(key).doPostOperateOps().getResult();
+			if (response != null) {
+				responses.add(key, response);
+			}
+		}
+	}
 
-    @Override
-    public Object getResponse() {
-        return responses;
-    }
+	private boolean isNotMainPartition() {
+		return getReplicaIndex() != 0;
+	}
 
-    @Override
-    public boolean shouldBackup() {
-        return mapContainer.getTotalBackupCount() > 0 && entryProcessor.getBackupProcessor() != null;
-    }
+	private boolean topologyChanged() {
+		return memberListVersion != clusterService.getMemberListVersion();
+	}
 
-    @Override
-    public int getSyncBackupCount() {
-        return 0;
-    }
+	protected Predicate getPredicate() {
+		return null;
+	}
 
-    @Override
-    public int getAsyncBackupCount() {
-        return mapContainer.getTotalBackupCount();
-    }
+	@Override
+	public Object getResponse() {
+		return responses;
+	}
 
-    @Override
-    public Operation getBackupOperation() {
-        EntryBackupProcessor backupProcessor = entryProcessor.getBackupProcessor();
-        MultipleEntryBackupOperation backupOperation = null;
-        if (backupProcessor != null) {
-            backupOperation = new MultipleEntryBackupOperation(name, keys, backupProcessor);
-        }
-        return backupOperation;
-    }
+	@Override
+	public boolean shouldBackup() {
+		return mapContainer.getTotalBackupCount() > 0 && entryProcessor.getBackupProcessor() != null;
+	}
 
-    @Override
-    protected void readInternal(ObjectDataInput in) throws IOException {
-        super.readInternal(in);
-        entryProcessor = in.readObject();
-        int size = in.readInt();
-        keys = createHashSet(size);
-        for (int i = 0; i < size; i++) {
-            Data key = in.readData();
-            keys.add(key);
-        }
+	@Override
+	public int getSyncBackupCount() {
+		return 0;
+	}
 
-    }
+	@Override
+	public int getAsyncBackupCount() {
+		return mapContainer.getTotalBackupCount();
+	}
 
-    @Override
-    protected void writeInternal(ObjectDataOutput out) throws IOException {
-        super.writeInternal(out);
-        out.writeObject(entryProcessor);
-        out.writeInt(keys.size());
-        for (Data key : keys) {
-            out.writeData(key);
-        }
-    }
+	@Override
+	public Operation getBackupOperation() {
+		EntryBackupProcessor backupProcessor = entryProcessor.getBackupProcessor();
+		MultipleEntryBackupOperation backupOperation = null;
+		if (backupProcessor != null) {
+			backupOperation = new MultipleEntryBackupOperation(name, keys, backupProcessor);
+		}
+		return backupOperation;
+	}
 
-    @Override
-    public int getId() {
-        return MapDataSerializerHook.MULTIPLE_ENTRY;
-    }
+	@Override
+	protected void readInternal(ObjectDataInput in) throws IOException {
+		super.readInternal(in);
+		entryProcessor = in.readObject();
+		int size = in.readInt();
+		keys = createHashSet(size);
+		for (int i = 0; i < size; i++) {
+			Data key = in.readData();
+			keys.add(key);
+		}
+
+	}
+
+	@Override
+	protected void writeInternal(ObjectDataOutput out) throws IOException {
+		super.writeInternal(out);
+		out.writeObject(entryProcessor);
+		out.writeInt(keys.size());
+		for (Data key : keys) {
+			out.writeData(key);
+		}
+	}
+
+	@Override
+	public int getId() {
+		return MapDataSerializerHook.MULTIPLE_ENTRY;
+	}
+
 }

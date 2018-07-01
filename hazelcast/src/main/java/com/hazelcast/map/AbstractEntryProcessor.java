@@ -16,13 +16,13 @@
 
 package com.hazelcast.map;
 
-import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.HazelcastInstanceAware;
-import com.hazelcast.nio.serialization.SerializableByConvention;
+import static com.hazelcast.nio.serialization.SerializableByConvention.Reason.PUBLIC_API;
 
 import java.util.Map;
 
-import static com.hazelcast.nio.serialization.SerializableByConvention.Reason.PUBLIC_API;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.HazelcastInstanceAware;
+import com.hazelcast.nio.serialization.SerializableByConvention;
 
 /**
  * An abstract {@link EntryProcessor} that already has implemented the {@link #getBackupProcessor()}. In a most cases you
@@ -67,6 +67,11 @@ public abstract class AbstractEntryProcessor<K, V> implements EntryProcessor<K, 
     public final EntryBackupProcessor<K, V> getBackupProcessor() {
         return entryBackupProcessor;
     }
+
+    @Override
+	public TopologyChangeStrategy onTopologyChange() {
+		return TopologyChangeStrategy.CONTINUE;
+	}
 
     @SerializableByConvention(PUBLIC_API)
     private class EntryBackupProcessorImpl implements EntryBackupProcessor<K, V>, HazelcastInstanceAware {
